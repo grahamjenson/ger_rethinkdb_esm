@@ -1,0 +1,37 @@
+{
+    "name": "ger_rethinkdb_esm",
+    "description": "An Event Store Manager for Good Enough Recommendations (GER) using RethinkDB",
+    "url": "https://github.com/grahamjenson/ger_rethinkdb_esm.git",
+    "keywords": [
+        "recommend",
+        "recommended",
+        "recommendation",
+        "engine",
+        "collaborative",
+        "filtering",
+        "rethinkdb"
+    ],
+    "author": "Graham Jenson <grahamjenson@maori.geek.nz>",
+    "dependencies": {
+        "bluebird": "2.9.25",
+        "rethinkdbdash": "neumino/rethinkdbdash#master",
+        "lodash": "3.9.3",
+        "moment": "2.8.3",
+        "coffee-script": "1.9.3"
+    },
+    "devDependencies": {
+        "mocha": "1.18.2",
+        "chai": "1.9.1",
+        "ger": "grahamjenson/ger"
+    },
+    "scripts": {
+        "test": "mocha"
+    },
+    "main": "rethinkdb.js",
+    "version": "0.0.01",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/grahamjenson/ger.git"
+    }
+}
