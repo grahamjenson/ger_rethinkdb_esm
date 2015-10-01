@@ -216,7 +216,68 @@ class RethinkDBESM
   ###########################################
 
 
-  thing_neighbourhood: () ->
+  thing_neighbourhood: (namespace, thing, actions, options = {}) ->
+    return bb.try(-> []) if !actions or actions.length == 0
+
+    options = _.defaults(options,
+      neighbourhood_size: 100
+      neighbourhood_search_size: 500
+      time_until_expiry: 0
+      current_datetime: new Date()
+    )
+    options.expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
+
+    r = @_r
+    action_things = ([a, thing] for a in actions)
+    r.table("#{namespace}_events")
+    .getAll(action_things..., {index: "action_thing"} )
+    .filter( (row) =>
+      row('created_at').le(@convert_date(options.current_datetime))
+    )
+    .orderBy(r.desc('created_at'))
+    .limit(options.neighbourhood_search_size)
+    .concatMap((row) =>
+      r.table("#{namespace}_events").getAll([row("person"),row("action")],{index: "person_action"})
+      .filter((row) ->
+        row("thing").ne(thing)
+      )
+    )
+    .group("thing")
+    .ungroup()
+    .map((row) =>
+      {
+        thing: row("group"),
+        people: row("reduction").map((row) -> row('person')).distinct()
+        last_actioned_at: row("reduction").map( (row) -> row('created_at')).max()
+        last_expires_at: row("reduction").map( (row) -> row('expires_at')).max()
+        count: row("reduction").count()
+      }
+    )
+    .filter( (row) =>
+      row('last_expires_at').ge(@convert_date(options.expires_after))
+    )
+    .orderBy(r.desc("count"))
+    .limit(options.neighbourhood_size)
+    .run()
+    .then( (ret) ->
+      console.log JSON.stringify(ret,null,2)
+      ret
+    )
+    #
+
+    # one_degree_away = @_one_degree_away(namespace, 'thing', 'person', thing, actions, options)
+    # .orderByRaw("action_count DESC")
+
+    # @_knex(one_degree_away.as('x'))
+    # .where('x.last_expires_at', '>', options.expires_after)
+    # .where('x.last_actioned_at', '<=', options.current_datetime)
+    # .orderByRaw("x.action_count DESC")
+    # .limit(options.neighbourhood_size)
+    # .then( (rows) ->
+    #   for row in rows
+    #     row.people = _.uniq(row.person) # difficult in postgres
+    #   rows
+    # )
 
   calculate_similarities_from_thing: () ->
 
