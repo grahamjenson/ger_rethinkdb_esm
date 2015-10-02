@@ -5,6 +5,8 @@ moment = require 'moment'
 shasum = null
 _ = require 'lodash'
 
+g = require 'ger'
+Errors = g.Errors
 
 get_hash = (value) ->
   shasum = crypto.createHash("sha256")
@@ -375,39 +377,42 @@ class RethinkDBESM
       time_until_expiry: 0
       current_datetime: new Date()
     )
-    options.actions = actions
-    options.expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
-
+    expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
 
     r = @_r
     person_actions = ([person, a] for a in actions)
-    r.table("#{namespace}_events").getAll(person_actions..., {index: "person_action"} )
+
+    r.table("#{namespace}_events")
+    .getAll(person_actions..., {index: "person_action"} )
+    .filter( (row) => row('created_at').le(@convert_date(options.current_datetime)))
     .orderBy(r.desc('created_at'))
-    .limit(search_limit)
+    .limit(options.neighbourhood_search_size)
     .concatMap((row) =>
-      r.table("#{namespace}_events").getAll([row("thing"), row("action")],{index: "thing_action"})
-      .filter((row) ->
-        row("person").ne(person)
-      )
-      .map((row) ->
-        {person: row("person"),action: row("action")}
-      )
+      r.table("#{namespace}_events")
+      .getAll(row("thing"),{index: "thing"})
+      .filter((row) -> r.expr(actions).contains(row('action')))
+      .filter((row) -> row("person").ne(person))
+      .filter( (row) => row('created_at').le(@convert_date(options.current_datetime)))
     )
     .group("person")
     .ungroup()
-    .filter((row) =>
-      row("reduction")("action").contains(action)
-    )
     .map((row) =>
       {
         person: row("group"),
         count: row("reduction").count()
       }
     )
-    .orderBy(r.desc('count'))
-    .limit(limit)("person")
+    .filter( (row) =>
+      r.table("#{namespace}_events")
+      .getAll(row("person"),{index: "person"})
+      .filter((row) -> r.expr(actions).contains(row('action')))
+      .filter((row) => row('expires_at').ge(@convert_date(expires_after)))
+      .count()
+      .gt(0)
+    )
+    .orderBy(r.desc("count"))
+    .limit(options.neighbourhood_size)("person")
     .run()
-
 
   calculate_similarities_from_person: (namespace, person, people, actions, options={}) ->
     @_similarities(namespace, 'person', 'thing', person, people, actions, options)
@@ -520,7 +525,7 @@ class RethinkDBESM
     promises = []
     for thing in things
       for action in actions
-        promises.push @_r.table("#{namespace}_events").getAll([thing, action], {index: "thing_action"}).orderBy(@_r.desc("created_at")).skip(trunc_size).delete().run({useOutdated: true, durability: "soft"})
+        promises.push @_r.table("#{namespace}_events").getAll([thing, action], {index: "thing_action"}).orderBy(@_r.desc("created_at")).skip(trunc_size).delete().run({ durability: "soft"})
 
     bb.all(promises)
 
@@ -531,7 +536,7 @@ class RethinkDBESM
     promises = []
     for person in people
       for action in actions
-        promises.push @_r.table("#{namespace}_events").getAll([person, action],{index: "person_action"}).orderBy(@_r.desc("created_at")).skip(trunc_size).delete().run({useOutdated: true,durability: "soft"})
+        promises.push @_r.table("#{namespace}_events").getAll([person, action],{index: "person_action"}).orderBy(@_r.desc("created_at")).skip(trunc_size).delete().run({durability: "soft"})
     #cut each action down to size
     bb.all(promises)
 
@@ -539,7 +544,7 @@ class RethinkDBESM
     #TODO move too offset method
     #removes old events till there is only number_of_events left
     @_r.table("#{namespace}_events").orderBy({index: @_r.desc("created_at")})
-    .skip(number_of_events).delete().run({useOutdated: true,durability: "soft"})
+    .skip(number_of_events).delete().run({durability: "soft"})
 
   ###########################################
   ####     END Compact Function          ####
