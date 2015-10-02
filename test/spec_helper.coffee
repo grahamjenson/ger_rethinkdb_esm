@@ -5,7 +5,9 @@ global.assert = chai.assert
 global._ = require 'lodash'
 
 global.RethinkDBESM = require '../rethinkdb_esm'
-global.GER = require 'ger'
+
+g = require('ger')
+global.GER = g.GER
 
 rethinkdbdash = require 'rethinkdbdash'
 
@@ -14,7 +16,6 @@ global.bb = require 'bluebird'
 
 global.moment = require "moment"
 
-global.default_esm = RethinkDBESM
 
 global.default_namespace = 'default'
 
@@ -32,7 +33,7 @@ global.next_week = moment().add(7, 'days')
 global.new_esm = (ESM) ->
   new ESM({r: r})
 
-global.init_esm = (ESM = global.default_esm, namespace = global.default_namespace) ->
+global.init_esm = (ESM, namespace = global.default_namespace) ->
   #in
   esm = new_esm(ESM)
   #drop the current tables, reinit the tables, return the esm
@@ -40,6 +41,7 @@ global.init_esm = (ESM = global.default_esm, namespace = global.default_namespac
   .then( -> esm.initialize(namespace))
   .then( -> esm)
 
-global.init_ger = (ESM = global.default_esm, namespace = global.default_namespace) ->
-  init_esm(ESM, namespace).then( (esm) -> new GER(esm))
+global.init_ger = (ESM, namespace = global.default_namespace) ->
+  init_esm(ESM, namespace)
+  .then( (esm) -> new GER(esm))
 

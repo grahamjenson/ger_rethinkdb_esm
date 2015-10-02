@@ -33,10 +33,12 @@ class RethinkDBESM
     else
       return bb.try(-> false)
 
-  try_drop_table: (table, table_list) ->
-    if table in table_list
-      # drop and create are VERY slow
-      return @_r.tableDrop(table).run().then(( ret ) -> true)
+  try_delete_namespace: (namespace, table_list) ->
+    if 'namespaces' in table_list
+      @_r.table('namespaces')
+      .filter({namespace: namespace})
+      .delete().run()
+      .then(( ret ) -> true)
     else
       return bb.try(-> false)
 
@@ -44,7 +46,7 @@ class RethinkDBESM
     @_r.tableList().run().then( (list) =>
       bb.all([
         @try_delete_table("#{namespace}_events", list),
-        @try_drop_table("#{namespace}_schema", list) #table is only a marker
+        @try_delete_namespace(namespace, list) #table is only a marker
       ])
     )
 
@@ -54,25 +56,27 @@ class RethinkDBESM
     )
 
   list_namespaces: () ->
-    @_r.tableList().run().then( (list) =>
-      list = (li.replace('_schema','') for li in list when _.contains(li, '_schema'))
+    @_r.table('namespaces').run()
+    .then( (ret) ->
+      ret.map((r) -> r.namespace)
     )
 
   initialize: (namespace) ->
     @_r.tableList().run().then( (list) =>
       bb.all([
         @try_create_table("#{namespace}_events", list)
-        @try_create_table("#{namespace}_schema", list)
+        @try_create_table("namespaces", list)
       ])
     )
     .spread( (events_created, schema_created) =>
       promises = []
       if events_created
-        promises = promises.concat([@_r.table("#{namespace}_events").indexCreate("created_at").run(),
+        promises = promises.concat([
+          @_r.table("#{namespace}_events").indexCreate("created_at").run(),
           @_r.table("#{namespace}_events").indexCreate("expires_at").run(),
           @_r.table("#{namespace}_events").indexCreate("person").run(),
           @_r.table("#{namespace}_events").indexCreate("person_thing",[@_r.row("person"),@_r.row("thing")]).run(),
-          @_r.table("#{namespace}_events").indexCreate("action_thing",[@_r.row("action"),@_r.row("thing")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("thing_action",[@_r.row("thing"),@_r.row("action")]).run(),
           @_r.table("#{namespace}_events").indexCreate("person_action",[@_r.row("person"),@_r.row("action")]).run(),
           @_r.table("#{namespace}_events").indexCreate("person_action_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("thing").run(),
@@ -80,6 +84,9 @@ class RethinkDBESM
           @_r.table("#{namespace}_events").indexWait().run()
         ])
       bb.all(promises)
+    )
+    .then( =>
+      @_r.table("namespaces").insert({id: get_hash(namespace), namespace: namespace}, {conflict:  "update"})
     )
 
   ########################################
@@ -116,14 +123,15 @@ class RethinkDBESM
   add_event: (namespace, person, action, thing, dates = {}) ->
     created_at = @convert_date(dates.created_at) || @_r.ISO8601(new Date().toISOString())
     expires_at =  @convert_date(dates.expires_at)
-
     @add_event_to_db(namespace, person, action, thing, created_at, expires_at)
 
   add_event_to_db: (namespace, person, action, thing, created_at, expires_at = null) ->
     insert_attr = { person: person, action: action, thing: thing, created_at: created_at, expires_at: expires_at}
     insert_attr.id = get_hash(person.toString() + action + thing)
 
-    @_r.table("#{namespace}_events").insert(insert_attr, {conflict:  "update", durability: "soft"}).run()
+    @_r.table("#{namespace}_events")
+    .insert(insert_attr, {conflict:  "update", durability: "soft"})
+    .run()
     .catch( (error) ->
       if error.message.indexOf("Table") > -1 and error.message.indexOf("does not exist") > -1
         throw new Errors.NamespaceDoestNotExist()
@@ -162,7 +170,7 @@ class RethinkDBESM
   delete_events: (namespace, person, action, thing) ->
     @_event_selection(namespace, person, action, thing)
     .delete()
-    .run({useOutdated: true,durability: "soft"})
+    .run({durability: "soft"})
 
 
   count_events: (namespace) ->
@@ -184,8 +192,8 @@ class RethinkDBESM
       index = "person_thing"
       index_fields = [person, thing]
     else if action and thing
-      index = "action_thing"
-      index_fields = [action, thing]
+      index = "thing_action"
+      index_fields = [thing, action]
     else if person and !action and !thing
       index = "person"
       index_fields = person
@@ -228,9 +236,9 @@ class RethinkDBESM
     options.expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
 
     r = @_r
-    action_things = ([a, thing] for a in actions)
+    thing_actions = ([thing, a] for a in actions)
     r.table("#{namespace}_events")
-    .getAll(action_things..., {index: "action_thing"} )
+    .getAll(thing_actions..., {index: "thing_action"} )
     .filter( (row) =>
       row('created_at').le(@convert_date(options.current_datetime))
     )
@@ -259,26 +267,95 @@ class RethinkDBESM
     .orderBy(r.desc("count"))
     .limit(options.neighbourhood_size)
     .run()
+
+
+
+  cosine_distance: (p1_values, p2_values) ->
+    return 0 if !p1_values || !p2_values
+
+    numerator = 0
+    for value, weight of p1_values
+      if p2_values[value]
+        numerator += weight * p2_values[value]
+
+    denominator_1 = 0
+    for value, weight of p1_values
+      denominator_1 += Math.pow(weight,2)
+
+    denominator_2 = 0
+    for value, weight of p2_values
+      denominator_2 += Math.pow(weight,2)
+
+    numerator/(Math.sqrt(denominator_1)*Math.sqrt(denominator_2))
+
+  get_cosine_distances: (namespace, column1, column2, value, values, actions, limit, event_decay_rate, now) ->
+    return bb.try(->[]) if values.length == 0
+    bindings = {value: value, now: now, event_decay_rate: event_decay_rate}
+    r = @_r
+
+    action_weights = []
+    value_actions = []
+    for a, weight of actions
+      action_weights.push {action:a, weight: weight}
+      value_actions.push {"#{column1}": value}
+      for v in values
+        value_actions.push {"#{column1}": v}
+
+
+    r.expr(value_actions)
+    .concatMap((row) =>
+      r.table("#{namespace}_events")
+      .getAll(row(column1), {index: "#{column1}"})
+      .filter( (row) => row('created_at').le(@convert_date(now)))
+      .filter((row) -> r.expr(Object.keys(actions)).contains(row('action')))
+      .orderBy(r.desc("created_at"))
+      .limit(limit)
+      .innerJoin(r.expr(action_weights), (row, actions) -> row('action').eq(actions('action')))
+      .zip()
+      .merge((row) => {days_since: row('created_at').sub(@convert_date(now)).div(86400).round()})
+      .merge(r.js("( function(row) { return { weight:  row.weight * Math.pow(#{event_decay_rate}, - row.days_since) } } )"))
+      .group("person", "thing")
+      .max('weight')
+      .ungroup()
+    )
+    .map((row) -> row('reduction'))
+    .group(column1)
+    .map((row) ->
+      {
+        value: row(column2)
+        weight: row("weight")
+      }
+    )
+    .ungroup()
+    .run()
+    .then( (ret) =>
+      value_actions = {}
+      for g in ret
+        value_actions[g.group] = {}
+        for red in g.reduction
+          value_actions[g.group][red.value] = red.weight
+
+      value_diffs = {}
+      for v in values
+        value_diffs[v] = @cosine_distance(value_actions[value], value_actions[v]) || 0
+      value_diffs
+    )
     .then( (ret) ->
       ret
     )
-    #
 
-    # one_degree_away = @_one_degree_away(namespace, 'thing', 'person', thing, actions, options)
-    # .orderByRaw("action_count DESC")
+  _similarities: (namespace, column1, column2, value, values, actions, options={}) ->
+    return bb.try(-> {}) if !actions or actions.length == 0 or values.length == 0
+    options = _.defaults(options,
+      similarity_search_size: 500
+      event_decay_rate: 1
+      current_datetime: new Date()
+    )
+    #TODO history search size should be more [similarity history search size]
+    @get_cosine_distances(namespace, column1, column2, value, values, actions, options.similarity_search_size, options.event_decay_rate, options.current_datetime)
 
-    # @_knex(one_degree_away.as('x'))
-    # .where('x.last_expires_at', '>', options.expires_after)
-    # .where('x.last_actioned_at', '<=', options.current_datetime)
-    # .orderByRaw("x.action_count DESC")
-    # .limit(options.neighbourhood_size)
-    # .then( (rows) ->
-    #   for row in rows
-    #     row.people = _.uniq(row.person) # difficult in postgres
-    #   rows
-    # )
-
-  calculate_similarities_from_thing: () ->
+  calculate_similarities_from_thing: (namespace, thing, things, actions, options={}) ->
+    @_similarities(namespace, 'thing', 'person', thing, things, actions, options)
 
 
   ###########################################
@@ -289,15 +366,26 @@ class RethinkDBESM
   #### Person Recommendation Function    ####
   ###########################################
 
-  person_neighbourhood: (namespace, person, actions, action, limit = 100, search_limit = 500) ->
+  person_neighbourhood: (namespace, person, actions, options = {}) ->
     return bb.try(-> []) if !actions or actions.length == 0
+
+    options = _.defaults(options,
+      neighbourhood_size: 100
+      neighbourhood_search_size: 500
+      time_until_expiry: 0
+      current_datetime: new Date()
+    )
+    options.actions = actions
+    options.expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
+
+
     r = @_r
     person_actions = ([person, a] for a in actions)
     r.table("#{namespace}_events").getAll(person_actions..., {index: "person_action"} )
     .orderBy(r.desc('created_at'))
     .limit(search_limit)
     .concatMap((row) =>
-      r.table("#{namespace}_events").getAll([row("action"),row("thing")],{index: "action_thing"})
+      r.table("#{namespace}_events").getAll([row("thing"), row("action")],{index: "thing_action"})
       .filter((row) ->
         row("person").ne(person)
       )
@@ -321,6 +409,11 @@ class RethinkDBESM
     .run()
 
 
+  calculate_similarities_from_person: (namespace, person, people, actions, options={}) ->
+    @_similarities(namespace, 'person', 'thing', person, people, actions, options)
+
+
+
   filter_things_by_previous_actions: (namespace, person, things, actions) ->
     return bb.try(-> things) if !actions or actions.length == 0 or things.length == 0
     indexes = []
@@ -328,112 +421,44 @@ class RethinkDBESM
     @_r(things).setDifference(@_r.table("#{namespace}_events").getAll(@_r.args(indexes),{index: "person_action"})
     .coerceTo("ARRAY")("thing")).run()
 
-  recent_recommendations_by_people: (namespace, action, people, limit = 50, expires_after = new Date().toISOString()) ->
-    return bb.try(->[]) if people.length == 0
+  recent_recommendations_by_people: (namespace, actions, people, options = {}) ->
+    return bb.try(->[]) if people.length == 0 || actions.length == 0
+
+    options = _.defaults(options,
+      recommendations_per_neighbour: 10
+      time_until_expiry: 0
+      current_datetime: new Date()
+    )
+    expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
+
+
     r = @_r
     people_actions = []
     for p in people
-      people_actions.push [p,action]
+      people_actions.push {person: p}
 
-    r.table("#{namespace}_events")
-    .getAll(r.args(people_actions), {index: 'person_action'})
-    .group("person","action")
-    .orderBy(r.desc("created_at"))
-    .limit(limit)
-    .map((row) ->
+    r.expr(people_actions)
+    .concatMap((row) =>
+      r.table("#{namespace}_events")
+      .getAll(row('person'), {index: "person"})
+      .filter( (row) => row('created_at').le(@convert_date(options.current_datetime)))
+      .filter( (row) => row('expires_at').ge(@convert_date(expires_after)))
+      .filter((row) -> r.expr(actions).contains(row('action')))
+      .orderBy(r.desc("created_at"))
+      .limit(options.recommendations_per_neighbour)
+    )
+    .group('person', 'thing')
+    .ungroup()
+    .map( (row) ->
       {
-        thing: row("thing"),
-        last_actioned_at: row("created_at").toEpochTime()
+        thing: row("group").nth(1)
+        person: row("group").nth(0)
+        last_actioned_at: row("reduction").map( (row) -> row('created_at')).max()
+        last_expires_at: row("reduction").map( (row) -> row('expires_at')).max()
       }
     )
-    .ungroup()
-    .map((row) =>
-      r.object(row("group").nth(0).coerceTo("string"),row("reduction"))
-    )
-    .reduce((a,b) ->
-      a.merge(b)
-    )
-    .default({})
+    .orderBy(r.desc("last_actioned_at"))
     .run()
-
-
-  calculate_similarities_from_person: (namespace, person, people, actions, person_history_limit, recent_event_days) ->
-    @get_jaccard_distances_between_values(namespace, person, people, actions, person_history_limit, recent_event_days)
-
-
-  get_jaccard_distances_between_values: (namespace, person, people, actions, limit = 500, days_ago=14) ->
-    return bb.try(->[]) if people.length == 0
-    r = @_r
-
-    people_actions = []
-
-    for a in actions
-      people_actions.push [person, a]
-      for p in people
-        people_actions.push [p,a]
-
-    r.table("#{namespace}_events")
-    .getAll(r.args(people_actions), {index: 'person_action'})
-    .group("person","action")
-    .orderBy(r.desc("created_at"))
-    .limit(limit).ungroup()
-    .map((row) ->
-      r.object(
-        row("group").nth(0).coerceTo("string"),
-        r.object(
-          row("group").nth(1).coerceTo("string"),
-          {
-            history: row("reduction")("thing"),
-            recent_history: row("reduction").filter((row) =>
-              row("created_at").during(r.now().sub(days_ago * 24 * 60 * 60),r.now())
-            )("thing")
-          }
-        )
-      )
-    ).reduce((a,b) ->
-        a.merge(b)
-    ).do((rows) ->
-      r(actions).concatMap((a) ->
-        r(a).coerceTo("string").do (_a) ->
-          rows(r(person).coerceTo("string"))(_a).default(null).do (person_histories) ->
-            r.branch(person_histories.ne(null), person_histories("history"),[]).coerceTo("array").do (person_history) ->
-              r.branch(person_histories.ne(null), person_histories("recent_history"),[]).coerceTo("array").do (person_recent_history) ->
-                r(people).map((p) ->
-                  r(p).coerceTo("string").do (_p) ->
-                    rows(_p)(_a).default(null).do (p_histories) ->
-                      r.branch(p_histories.ne(null),p_histories("history"),[]).coerceTo("array").do (p_history) ->
-                        r.branch(p_histories.ne(null),p_histories("recent_history"),[]).coerceTo("array").do (p_recent_history) ->
-                          r.object(_p,r.object(_a,r(p_history).setIntersection(person_history).count().div(r([r(p_history).setUnion(person_history).count(),1]).max()))).do (limit_distance) ->
-                            r.object(_p,r.object(_a,r(p_recent_history).setIntersection(person_recent_history).count().div(r([r.expr(p_recent_history).setUnion(person_recent_history).count(),1]).max()))).do (recent_distance) ->
-                              {
-                                  limit_distance: limit_distance,
-                                  recent_distance: recent_distance
-                              }
-                )
-        )
-      .reduce((a,b) ->
-        {
-          limit_distance: a("limit_distance").merge(b("limit_distance")),
-          recent_distance: a("recent_distance").merge(b("recent_distance"))
-        }
-      )
-    )
-    .do((data) ->
-      r(people).concatMap((p) ->
-        r(p).coerceTo("string").do (_p) ->
-          r(actions).map((a) ->
-            r(a).coerceTo("string").do (_a) ->
-              r.branch(data("recent_distance")(_p).ne(null).and(data("recent_distance")(_p)(_a).ne(null)),data("recent_distance")(_p)(_a), 0).do (recent_weight) ->
-                r.branch(data("limit_distance")(_p).ne(null).and(data("limit_distance")(_p)(_a).ne(null)),data("limit_distance")(_p)(_a), 0).do (event_weight) ->
-                  r.object(_p,r.object(_a, recent_weight.mul(4).add(event_weight.mul(1)).div(5)))
-          )
-      ).reduce((a,b) ->
-          a.merge(b)
-      )
-    )
-    .run()
-
-
 
   ###########################################
   #### END Person Recommendation Function####
@@ -495,7 +520,7 @@ class RethinkDBESM
     promises = []
     for thing in things
       for action in actions
-        promises.push @_r.table("#{namespace}_events").getAll([action,thing], {index: "action_thing"}).orderBy(@_r.desc("created_at")).skip(trunc_size).delete().run({useOutdated: true, durability: "soft"})
+        promises.push @_r.table("#{namespace}_events").getAll([thing, action], {index: "thing_action"}).orderBy(@_r.desc("created_at")).skip(trunc_size).delete().run({useOutdated: true, durability: "soft"})
 
     bb.all(promises)
 
