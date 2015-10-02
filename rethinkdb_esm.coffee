@@ -260,7 +260,6 @@ class RethinkDBESM
     .limit(options.neighbourhood_size)
     .run()
     .then( (ret) ->
-      console.log JSON.stringify(ret,null,2)
       ret
     )
     #
