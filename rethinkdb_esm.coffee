@@ -6,6 +6,7 @@ shasum = null
 _ = require 'lodash'
 
 g = require 'ger'
+
 Errors = g.Errors
 
 get_hash = (value) ->
@@ -169,11 +170,13 @@ class RethinkDBESM
       .slice(page*size, size*(page + 1))
       .run()
 
-  delete_events: (namespace, person, action, thing) ->
+  delete_events: (namespace, options= {}) ->
+    person = options.person
+    action = options.action
+    thing = options.thing
     @_event_selection(namespace, person, action, thing)
     .delete()
     .run({durability: "soft"})
-
 
   count_events: (namespace) ->
     @_r.table("#{namespace}_events").count().run()

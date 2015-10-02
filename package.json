@@ -17,12 +17,12 @@
         "rethinkdbdash": "neumino/rethinkdbdash#master",
         "lodash": "3.9.3",
         "moment": "2.8.3",
-        "coffee-script": "1.9.3"
+        "coffee-script": "1.9.3",
+        "ger": "grahamjenson/ger"
     },
     "devDependencies": {
         "mocha": "1.18.2",
-        "chai": "1.9.1",
-        "ger": "grahamjenson/ger"
+        "chai": "1.9.1"
     },
     "scripts": {
         "test": "mocha"
