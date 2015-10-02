@@ -6,8 +6,7 @@ shasum = null
 _ = require 'lodash'
 
 g = require 'ger'
-
-Errors = g.Errors
+NamespaceDoestNotExist = g.GER.NamespaceDoestNotExist
 
 get_hash = (value) ->
   shasum = crypto.createHash("sha256")
@@ -137,7 +136,7 @@ class RethinkDBESM
     .run()
     .catch( (error) ->
       if error.message.indexOf("Table") > -1 and error.message.indexOf("does not exist") > -1
-        throw new Errors.NamespaceDoestNotExist()
+        throw new NamespaceDoestNotExist()
     )
 
   find_events: (namespace, options = {}) ->
