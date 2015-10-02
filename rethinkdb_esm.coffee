@@ -251,7 +251,9 @@ class RethinkDBESM
     .orderBy(r.desc('created_at'))
     .limit(options.neighbourhood_search_size)
     .concatMap((row) =>
-      r.table("#{namespace}_events").getAll([row("person"),row("action")],{index: "person_action"})
+      r.table("#{namespace}_events")
+      .getAll(row("person"),{index: "person"})
+      .filter((row) -> r.expr(actions).contains(row('action')))
       .filter((row) ->
         row("thing").ne(thing)
       )
@@ -273,7 +275,10 @@ class RethinkDBESM
     .orderBy(r.desc("count"))
     .limit(options.neighbourhood_size)
     .run()
-
+    # .then( (ret) ->
+    #   console.log JSON.stringify(ret,null,2)
+    #   ret
+    # )
 
 
   cosine_distance: (p1_values, p2_values) ->
@@ -319,7 +324,7 @@ class RethinkDBESM
       .innerJoin(r.expr(action_weights), (row, actions) -> row('action').eq(actions('action')))
       .zip()
       .merge((row) => {days_since: row('created_at').sub(@convert_date(now)).div(86400).round()})
-      .merge(r.js("( function(row) { return { weight:  row.weight * Math.pow(#{event_decay_rate}, - row.days_since) } } )"))
+      .merge(r.js("( function(row) { return { weight:  row.weight * Math.pow(#{event_decay_rate}, - Math.abs(row.days_since)) } } )"))
       .group("person", "thing")
       .max('weight')
       .ungroup()
@@ -346,9 +351,10 @@ class RethinkDBESM
         value_diffs[v] = @cosine_distance(value_actions[value], value_actions[v]) || 0
       value_diffs
     )
-    .then( (ret) ->
-      ret
-    )
+    # .then( (ret) ->
+    #   console.log JSON.stringify(ret,null,2)
+    #   ret
+    # )
 
   _similarities: (namespace, column1, column2, value, values, actions, options={}) ->
     return bb.try(-> {}) if !actions or actions.length == 0 or values.length == 0
