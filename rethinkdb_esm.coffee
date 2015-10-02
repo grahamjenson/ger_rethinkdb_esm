@@ -167,6 +167,8 @@ class RethinkDBESM
     else
       #slower multi-event lookup
       @_event_selection(namespace, person, action, thing)
+      .filter((row) => row('expires_at').ge(@convert_date(options.expires_after)))
+      .filter((row) => row('created_at').le(@convert_date(options.current_datetime)))
       .slice(page*size, size*(page + 1))
       .run()
 
