@@ -18,7 +18,7 @@
         "lodash": "3.9.3",
         "moment": "2.8.3",
         "coffee-script": "1.9.3",
-        "ger": "grahamjenson/ger"
+        "ger": "0.0.98"
     },
     "devDependencies": {
         "mocha": "1.18.2",
@@ -32,6 +32,6 @@
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/grahamjenson/ger.git"
+        "url": "https://github.com/grahamjenson/ger_rethinkdb_esm.git"
     }
 }
