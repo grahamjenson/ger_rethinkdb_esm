@@ -4,12 +4,12 @@ global.assert = chai.assert
 
 global._ = require 'lodash'
 
-global.RethinkDBESM = require '../rethinkdb_esm'
+req = require '../rethinkdb_esm'
+global.RethinkDBESM = req.esm
+rethinkdbdash = req.r
 
 g = require('ger')
 global.GER = g.GER
-
-rethinkdbdash = require 'rethinkdbdash'
 
 r = rethinkdbdash({ host: '127.0.0.1', port: 28015, db:'test', timeout: 120000, buffer:10 , max: 50})
 global.bb = require 'bluebird'

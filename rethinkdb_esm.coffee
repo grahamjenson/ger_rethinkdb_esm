@@ -13,6 +13,8 @@ get_hash = (value) ->
   shasum.update(value.toString())
   shasum.digest("hex")
 
+rethinkdbdash = require 'rethinkdbdash'
+
 class RethinkDBESM
 
   ########################################
@@ -560,4 +562,7 @@ class RethinkDBESM
   ####     END Compact Function          ####
   ###########################################
 
-module.exports = RethinkDBESM;
+module.exports = {
+  esm: RethinkDBESM;
+  r: rethinkdbdash
+}
