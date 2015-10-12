@@ -10,6 +10,7 @@ rethinkdbdash = req.r
 
 g = require('ger')
 global.GER = g.GER
+NamespaceDoestNotExist = GER.NamespaceDoestNotExist
 
 r = rethinkdbdash({ host: '127.0.0.1', port: 28015, db:'test', timeout: 120000, buffer:10 , max: 50})
 global.bb = require 'bluebird'
@@ -31,7 +32,7 @@ global.next_week = moment().add(7, 'days')
 
 
 global.new_esm = (ESM) ->
-  new ESM({r: r})
+  new RethinkDBESM({r: r}, NamespaceDoestNotExist)
 
 global.init_esm = (ESM, namespace = global.default_namespace) ->
   #in

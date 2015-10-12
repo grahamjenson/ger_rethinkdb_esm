@@ -5,9 +5,6 @@ moment = require 'moment'
 shasum = null
 _ = require 'lodash'
 
-g = require 'ger'
-NamespaceDoestNotExist = g.GER.NamespaceDoestNotExist
-
 get_hash = (value) ->
   shasum = crypto.createHash("sha256")
   shasum.update(value.toString())
@@ -21,7 +18,7 @@ class RethinkDBESM
   ####    Initialization Functions    ####
   ########################################
 
-  constructor: (orms) ->
+  constructor: (orms = {}, @NamespaceDoestNotExist) ->
     @_r = orms.r
 
   try_create_table: (table, table_list) ->
@@ -136,9 +133,9 @@ class RethinkDBESM
     @_r.table("#{namespace}_events")
     .insert(insert_attr, {conflict:  "update", durability: "soft"})
     .run()
-    .catch( (error) ->
+    .catch( (error) =>
       if error.message.indexOf("Table") > -1 and error.message.indexOf("does not exist") > -1
-        throw new NamespaceDoestNotExist()
+        throw new @NamespaceDoestNotExist()
     )
 
   find_events: (namespace, options = {}) ->
