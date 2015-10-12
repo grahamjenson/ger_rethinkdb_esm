@@ -81,10 +81,10 @@ class RethinkDBESM
           @_r.table("#{namespace}_events").indexCreate("person_action",[@_r.row("person"),@_r.row("action")]).run(),
           @_r.table("#{namespace}_events").indexCreate("person_action_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("thing").run(),
-          @_r.table("#{namespace}_events").indexCreate("action").run(),
-          @_r.table("#{namespace}_events").indexWait().run()
+          @_r.table("#{namespace}_events").indexCreate("action").run()
+
         ])
-      bb.all(promises)
+      bb.all(promises).then( => @_r.table("#{namespace}_events").indexWait().run())
     )
     .then( =>
       @_r.table("namespaces").insert({id: get_hash(namespace), namespace: namespace}, {conflict:  "update"})
