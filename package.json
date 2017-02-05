@@ -12,6 +12,7 @@
         "rethinkdb"
     ],
     "author": "Graham Jenson <grahamjenson@maori.geek.nz>",
+    "contributors":["Thomas Modeneis <thomas.modeneis@gmail.com>"],
     "dependencies": {
         "bluebird": "2.9.25",
         "rethinkdbdash": "neumino/rethinkdbdash#master",
@@ -28,7 +29,7 @@
         "test": "mocha"
     },
     "main": "rethinkdb_esm.js",
-    "version": "0.0.05",
+    "version": "1.0.0",
     "license": "MIT",
     "repository": {
         "type": "git",
