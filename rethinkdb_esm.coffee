@@ -4,7 +4,7 @@ crypto = require 'crypto'
 moment = require 'moment'
 shasum = null
 _ = require 'lodash'
-DEBUG = process.env.DEBUG || true
+DEBUG = process.env.DEBUG || false
 
 get_hash = (value) ->
   shasum = crypto.createHash("sha256")
