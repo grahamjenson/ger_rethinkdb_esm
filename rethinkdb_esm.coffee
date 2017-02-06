@@ -22,6 +22,12 @@ class RethinkDBESM
   constructor: (orms = {}, @NamespaceDoestNotExist) ->
     @_r = orms.r
 
+  try_create_db:(db) ->
+    return @_r.dbCreate(db).run().then(-> true).catch(-> true)
+
+  try_delete_db:(db) ->
+    return @_r.dbDrop(db).run().then(-> true).catch(-> true)
+
   try_create_table: (table, table_list) ->
     if table in table_list
       return bb.try(-> false)
@@ -86,12 +92,15 @@ class RethinkDBESM
           @_r.table("#{namespace}_events").indexCreate("person_created_at_expires_at_action",[@_r.row("person"),@_r.row("created_at"),@_r.row("expires_at"),@_r.row("action")]).run(),
           @_r.table("#{namespace}_events").indexCreate("thing_action_person_created_at",[@_r.row("thing"),@_r.row("action"),@_r.row("person"),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("thing_action_created_at",[@_r.row("thing"),@_r.row("action"),@_r.row("created_at")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("thing_created_at",[@_r.row("thing"),@_r.row("created_at")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("action_created_at",[@_r.row("action"),@_r.row("created_at")]).run(),
 
 
           @_r.table("#{namespace}_events").indexCreate("person_action_expires_at",[@_r.row("person"),@_r.row("action"),@_r.row("expires_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("last_actioned_at").run(),
 
           @_r.table("#{namespace}_events").indexCreate("person_action_thing_expires_at_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("thing"),@_r.row("expires_at"),@_r.row("created_at")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("person_thing_created_at",[@_r.row("person"),@_r.row("thing"),@_r.row("created_at")]).run(),
 
           @_r.table("#{namespace}_events").indexCreate("person_expires_at_created_at",[@_r.row("person"),@_r.row("expires_at"),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("person_created_at",[@_r.row("person"),@_r.row("created_at")]).run(),
@@ -169,11 +178,24 @@ class RethinkDBESM
     size = options.size
     page = options.page
 
+    people = options.people
+
     person = options.person
     action = options.action
     thing = options.thing
 
-    if person and action and thing
+    #TODO: implement find_events to accept actions and things #3
+    if people
+      q = @_r.table("#{namespace}_events")
+      q = q.getAll(people..., {index: "person"} )
+      q = q.orderBy(@_r.desc('created_at'))
+
+      if (DEBUG)
+        console.log("find_events query people -> ",q)
+
+      q.run()
+
+    else if person and action and thing
       #Fast single look up
       @_event_selection(namespace, person, action, thing)
       .run()
@@ -185,6 +207,7 @@ class RethinkDBESM
       #optimized multi-event lookup
       index = null
       index_fields = null
+
       if person and action
         index = "person_action"
         index_fields = [person, action]
@@ -194,26 +217,27 @@ class RethinkDBESM
       else if action and thing
         index = "thing_action"
         index_fields = [thing, action]
+
       else if person and !action and !thing
         index = "person"
-        index_fields = person
+        index_fields = [person]
       else if action and !person and !thing
         index = "action"
-        index_fields = action
+        index_fields = [action]
       else if thing and !action and !person
         index = "thing"
-        index_fields = thing
+        index_fields = [thing]
 
       dt = r.minval
       if (options.expires_after)
         dt = @convert_date(options.expires_after)
         q = r.table("#{namespace}_events")
-          .between([index_fields,dt,r.minval], [index_fields, r.maxval, @convert_date(options.current_datetime)],
+          .between([index_fields..., dt, r.minval], [index_fields..., r.maxval, @convert_date(options.current_datetime)],
         {index: index+'_expires_at_created_at'}).orderBy({index:r.desc(index+'_expires_at_created_at')})
           .slice(page*size, size*(page + 1))
       else
         q = r.table("#{namespace}_events")
-          .between([index_fields,r.minval], [index_fields,@convert_date(options.current_datetime)],
+          .between([index_fields...,r.minval], [index_fields...,@convert_date(options.current_datetime)],
           {index: index+'_created_at'}).orderBy({index:r.desc(index+'_created_at')})
           .slice(page*size, size*(page + 1))
 
@@ -291,12 +315,22 @@ class RethinkDBESM
       current_datetime: new Date()
     )
     options.expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
-
     r = @_r
+
     q  = r.table("#{namespace}_events")
-    .between([thing,actions...,r.minval], [person, actions..., @convert_date(options.current_datetime)],
-    {index: 'thing_action_created_at'}).orderBy({index:r.desc("thing_action_created_at")})
-    .limit(options.neighbourhood_search_size)
+
+    if actions.length > 1
+      thing_actions = ([thing, a] for a in actions)
+      q = q.getAll(thing_actions..., {index: "thing_action"} )
+      .filter( (row) =>
+          row('created_at').le(@convert_date(options.current_datetime))
+        ).orderBy(r.desc('created_at'))
+    else
+      q = q.between([thing,actions...,r.minval], [thing, actions..., @convert_date(options.current_datetime)],
+      {index: 'thing_action_created_at'}).orderBy({index:r.desc("thing_action_created_at")})
+
+
+    q = q.limit(options.neighbourhood_search_size)
     .concatMap((row) =>
       r.table("#{namespace}_events")
       .getAll(row("person"),{index: "person"})
@@ -443,20 +477,39 @@ class RethinkDBESM
       current_datetime: new Date()
     )
     expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
-
     r = @_r
+    q  = r.table("#{namespace}_events")
 
-    q = r.table("#{namespace}_events")
-    .between([person,actions...,r.minval], [person, actions..., @convert_date(options.current_datetime)],
-    {index: 'person_action_created_at'}).orderBy({index:r.desc("person_action_created_at")})
-    .limit(options.neighbourhood_search_size)
-    .concatMap((row) =>
-      r.table("#{namespace}_events")
-      .between([row("thing"),row('action'),r.minval,r.minval],
-        [row("thing"), row('action'),r.maxval, @convert_date(options.current_datetime)],
-      {index: 'thing_action_person_created_at'})
-    )
-    .group("person")
+    if actions.length > 1
+      person_actions = ([person, a] for a in actions)
+      q = q.getAll(person_actions..., {index: "person_action"} )
+      .filter( (row) => row('created_at').le(@convert_date(options.current_datetime)))
+      .orderBy(r.desc('created_at'))
+    else
+      q = q.between([person,actions...,r.minval], [person, actions..., @convert_date(options.current_datetime)],
+        {index: 'person_action_created_at'}).orderBy({index:r.desc("person_action_created_at")})
+
+
+    q = q.limit(options.neighbourhood_search_size)
+
+    if actions.length > 1
+      q = q.concatMap((row) =>
+        r.table("#{namespace}_events")
+        .getAll(row("thing"),{index: "thing"})
+        .filter((row) -> r.expr(actions).contains(row('action')))
+        .filter((row) -> row("person").ne(person))
+        .filter( (row) => row('created_at').le(@convert_date(options.current_datetime)))
+      )
+    else
+      q = q.concatMap((row) =>
+        r.table("#{namespace}_events")
+        .between([row("thing"),row('action'),r.minval,r.minval],
+          [row("thing"), row('action'),r.maxval, @convert_date(options.current_datetime)],
+        {index: 'thing_action_person_created_at'}).filter((row) -> row("person").ne(person))
+      )
+
+
+    q = q.group("person")
     .ungroup()
     .map((row) =>
       {
@@ -464,15 +517,27 @@ class RethinkDBESM
         count: row("reduction").count()
       }
     )
-    .filter( (row) =>
-      r.table("#{namespace}_events")
-        .between([row("person"),actions...,@convert_date(expires_after)],
-        [row("person"), actions..., r.maxval],
-        {index: 'person_action_expires_at'})
-      .count()
-      .gt(0)
-    )
-    .orderBy(r.desc("count"))
+
+    if actions.length > 1
+      q = q.filter( (row) =>
+        r.table("#{namespace}_events")
+          .getAll(row("person"),{index: "person"})
+          .filter((row) -> r.expr(actions).contains(row('action')))
+          .filter((row) => row('expires_at').ge(@convert_date(expires_after)))
+          .count()
+          .gt(0)
+        )
+    else
+      q = q.filter( (row) =>
+        r.table("#{namespace}_events")
+          .between([row("person"),actions...,@convert_date(expires_after)],
+          [row("person"), actions..., r.maxval],
+          {index: 'person_action_expires_at'})
+        .count()
+        .gt(0)
+        )
+
+    q = q.orderBy(r.desc("count"))
     .limit(options.neighbourhood_size)("person")
 
     if (DEBUG)
@@ -504,21 +569,25 @@ class RethinkDBESM
       current_datetime: new Date()
     )
     expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
+#    dt = moment(options.current_datetime).add(-1, 'seconds').format()
 
-
+#    console.log("recent_recommendations_by_people, date -> ",expires_after,dt)
     r = @_r
     people_actions = []
     for p in people
       people_actions.push {person: p}
 
     q = r.expr(people_actions)
-    .concatMap((row) =>
-      r.table("#{namespace}_events")
-      .between([row('person'), r.minval,@convert_date(expires_after),actions...], [row('person'), @convert_date(options.current_datetime),r.maxval,actions...],
-      {index: 'person_created_at_expires_at_action'})
+      .concatMap((row) =>
+        r.table("#{namespace}_events")
+        .between([row('person'), @convert_date(expires_after), r.minval], [row('person'), r.maxval, @convert_date(options.current_datetime)],
+        {index: 'person_expires_at_created_at',leftBound:'open',rightBound: 'closed'})
+        .filter((row) -> r.expr(actions).contains(row('action')))
+        #TODO: remove this filter finding why between for current_datetime fails
+        .filter( (row) => row('created_at').le(@convert_date(options.current_datetime)))
         .orderBy(r.desc("created_at"))
         .limit(options.recommendations_per_neighbour)
-    )
+      )
     .group('person', 'thing')
     .ungroup()
     .map( (row) ->
