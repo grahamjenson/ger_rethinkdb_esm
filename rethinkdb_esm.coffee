@@ -21,6 +21,9 @@ class RethinkDBESM
 
   constructor: (orms = {}, @NamespaceDoestNotExist) ->
     @_r = orms.r
+    @_DURABILITY = orms.durability || "soft"
+    @_CONFLICT = orms.conflict || "update"
+    @_BATCH_SIZE = orms.batch_size || 500
 
   try_create_db:(db) ->
     return @_r.dbCreate(db).run().then(-> true).catch(-> true)
@@ -81,31 +84,34 @@ class RethinkDBESM
       if events_created
         promises = promises.concat([
           @_r.table("#{namespace}_events").indexCreate("created_at").run(),
-          @_r.table("#{namespace}_events").indexCreate("expires_at").run(),
+          @_r.table("#{namespace}_events").indexCreate("expires_at",@_r.row("expires_at").default(false)).run(),
           @_r.table("#{namespace}_events").indexCreate("person").run(),
           @_r.table("#{namespace}_events").indexCreate("person_thing",[@_r.row("person"),@_r.row("thing")]).run(),
           @_r.table("#{namespace}_events").indexCreate("thing_action",[@_r.row("thing"),@_r.row("action")]).run(),
+
           @_r.table("#{namespace}_events").indexCreate("person_action",[@_r.row("person"),@_r.row("action")]).run(),
           @_r.table("#{namespace}_events").indexCreate("person_action_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("created_at")]).run(),
 
           #new indexes for performance
           @_r.table("#{namespace}_events").indexCreate("person_created_at_expires_at_action",[@_r.row("person"),@_r.row("created_at"),@_r.row("expires_at"),@_r.row("action")]).run(),
+
+
           @_r.table("#{namespace}_events").indexCreate("thing_action_person_created_at",[@_r.row("thing"),@_r.row("action"),@_r.row("person"),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("thing_action_created_at",[@_r.row("thing"),@_r.row("action"),@_r.row("created_at")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("thing_action_created_at_expires_at",[@_r.row("thing"),@_r.row("action"),@_r.row("created_at"),@_r.row("expires_at").default(false)]).run(),
+
           @_r.table("#{namespace}_events").indexCreate("thing_created_at",[@_r.row("thing"),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("action_created_at",[@_r.row("action"),@_r.row("created_at")]).run(),
 
 
-          @_r.table("#{namespace}_events").indexCreate("person_action_expires_at",[@_r.row("person"),@_r.row("action"),@_r.row("expires_at")]).run(),
-          @_r.table("#{namespace}_events").indexCreate("last_actioned_at").run(),
+          @_r.table("#{namespace}_events").indexCreate("person_action_expires_at",[@_r.row("person"),@_r.row("action"),@_r.row("expires_at").default(false)]).run(),
+          @_r.table("#{namespace}_events").indexCreate("last_actioned_at",@_r.row("last_actioned_at").default(false)).run(),
 
-          @_r.table("#{namespace}_events").indexCreate("person_action_thing_expires_at_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("thing"),@_r.row("expires_at"),@_r.row("created_at")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("person_action_thing_expires_at_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("thing"),@_r.row("expires_at").default(false),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("person_thing_created_at",[@_r.row("person"),@_r.row("thing"),@_r.row("created_at")]).run(),
 
-          @_r.table("#{namespace}_events").indexCreate("person_expires_at_created_at",[@_r.row("person"),@_r.row("expires_at"),@_r.row("created_at")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("person_expires_at_created_at",[@_r.row("person"),@_r.row("expires_at").default(false),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("person_created_at",[@_r.row("person"),@_r.row("created_at")]).run(),
-
-
 
           @_r.table("#{namespace}_events").indexCreate("thing").run(),
           @_r.table("#{namespace}_events").indexCreate("action").run()
@@ -114,7 +120,7 @@ class RethinkDBESM
       bb.all(promises).then( => @_r.table("#{namespace}_events").indexWait().run())
     )
     .then( =>
-      @_r.table("namespaces").insert({id: get_hash(namespace), namespace: namespace}, {conflict:  "update"})
+      @_r.table("namespaces").insert({id: get_hash(namespace), namespace: namespace}, {conflict:  @_CONFLICT})
     )
 
   ########################################
@@ -144,9 +150,35 @@ class RethinkDBESM
 
   add_events: (events) ->
     promises = []
+    batch = []
+    namespace = events[0].namespace if events.length > 0
+
     for e in events
-      promises.push @add_event(e.namespace, e.person, e.action, e.thing, {created_at: e.created_at, expires_at: e.expires_at})
+      created_at = @convert_date(e.created_at) || @_r.ISO8601(new Date().toISOString())
+      expires_at =  @convert_date(e.expires_at)
+      insert_attr = { namespace: e.namespace, person: e.person, action: e.action, thing: e.thing, created_at: created_at, expires_at: expires_at}
+      insert_attr.id = get_hash(e.person.toString() + e.action + e.thing)
+      batch.push(insert_attr)
+
+      if batch.length > @_BATCH_SIZE
+        promises.push(@add_events_batch(batch))
+        batch = []
+
+    if batch.length > 0
+      promises.push(@add_events_batch(batch,namespace))
+
     bb.all(promises)
+
+  add_events_batch: (events,namespace) ->
+    return bb.try(->[]) if events.length == 0
+
+    @_r.table("#{namespace}_events")
+      .insert(events, {returnChanges: false, conflict:  @_CONFLICT, durability: @_DURABILITY})
+      .run()
+      .catch( (error) =>
+        if error.message.indexOf("Table") > -1 and error.message.indexOf("does not exist") > -1
+          throw new @NamespaceDoestNotExist()
+    )
 
   add_event: (namespace, person, action, thing, dates = {}) ->
     created_at = @convert_date(dates.created_at) || @_r.ISO8601(new Date().toISOString())
@@ -158,7 +190,7 @@ class RethinkDBESM
     insert_attr.id = get_hash(person.toString() + action + thing)
 
     @_r.table("#{namespace}_events")
-    .insert(insert_attr, {conflict:  "update", durability: "soft"})
+    .insert(insert_attr, {returnChanges: false, conflict:  @_CONFLICT, durability: @_DURABILITY})
     .run()
     .catch( (error) =>
       if error.message.indexOf("Table") > -1 and error.message.indexOf("does not exist") > -1
@@ -252,7 +284,7 @@ class RethinkDBESM
     thing = options.thing
     @_event_selection(namespace, person, action, thing)
     .delete()
-    .run({durability: "soft"})
+    .run({durability: @_DURABILITY})
 
   count_events: (namespace) ->
     @_r.table("#{namespace}_events").count().run()
@@ -317,38 +349,30 @@ class RethinkDBESM
     options.expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
     r = @_r
 
-    q  = r.table("#{namespace}_events")
+    thing_actions = ({thing:thing, action:a} for a in actions)
 
-    if actions.length > 1
-      thing_actions = ([thing, a] for a in actions)
-      q = q.getAll(thing_actions..., {index: "thing_action"} )
-      .filter( (row) =>
-          row('created_at').le(@convert_date(options.current_datetime))
-        ).orderBy(r.desc('created_at'))
-    else
-      q = q.between([thing,actions...,r.minval], [thing, actions..., @convert_date(options.current_datetime)],
-      {index: 'thing_action_created_at'}).orderBy({index:r.desc("thing_action_created_at")})
-
-
+    q = r.expr(thing_actions).concatMap((row) =>
+          r.table("#{namespace}_events").between([row("thing"),row("action"),r.minval, @convert_date(options.expires_after)], [row("thing"),row("action"), @convert_date(options.current_datetime),r.maxval],
+          {index: 'thing_action_created_at_expires_at'})
+          .orderBy({index:r.desc("thing_action_created_at_expires_at")})
+        )
     q = q.limit(options.neighbourhood_search_size)
     .concatMap((row) =>
-      r.table("#{namespace}_events")
-      .getAll(row("person"),{index: "person"})
-      .filter((row) -> r.expr(actions).contains(row('action')))
-      .filter((row) ->
-        row("thing").ne(thing)
+      r.expr(thing_actions).concatMap((row1) =>
+        r.table("#{namespace}_events").getAll([row("person"), row1('action')],{index: "person_action"})
+          .filter((row) -> row("thing").ne(thing))
       )
     )
     .group("thing")
     .ungroup()
     .map((row) =>
-      {
-        thing: row("group"),
-        people: row("reduction").map((row) -> row('person')).distinct()
-        last_actioned_at: row("reduction").map( (row) -> row('created_at')).max()
-        last_expires_at: row("reduction").map( (row) -> row('expires_at')).max()
-        count: row("reduction").count()
-      }
+        {
+          thing: row("group"),
+          people: row("reduction").map((row) -> row('person')).distinct()
+          last_actioned_at: row("reduction").map((row) -> row('created_at')).max()
+          last_expires_at: row("reduction").map((row) -> row('expires_at')).max()
+          count: row("reduction").count()
+        }
     )
     .filter( (row) =>
       row('last_expires_at').ge(@convert_date(options.expires_after))
@@ -393,18 +417,14 @@ class RethinkDBESM
     value_actions = []
     for a, weight of actions
       action_weights.push {action:a, weight: weight}
-      value_actions.push {"#{column1}": value}
+      value_actions.push {"#{column1}": value, "weight":weight, "action":a}
       for v in values
-        value_actions.push {"#{column1}": v}
-
+        value_actions.push {"#{column1}": v, "weight":weight, "action":a}
 
     q  = r.expr(value_actions)
     .concatMap((row) =>
-      r.table("#{namespace}_events")
-      .getAll(row(column1), {index: "#{column1}"})
-      .filter( (row) => row('created_at').le(@convert_date(now)))
-      .filter((row) -> r.expr(Object.keys(actions)).contains(row('action')))
-      .orderBy(r.desc("created_at"))
+      r.table("#{namespace}_events").between([row(column1),row("action"), r.minval],[row(column1),row("action"), @convert_date(now)], {index: "#{column1}_action_created_at"})
+      .orderBy({index:r.desc("#{column1}_action_created_at")})
       .limit(limit)
       .innerJoin(r.expr(action_weights), (row, actions) -> row('action').eq(actions('action')))
       .zip()
@@ -480,34 +500,23 @@ class RethinkDBESM
     r = @_r
     q  = r.table("#{namespace}_events")
 
-    if actions.length > 1
-      person_actions = ([person, a] for a in actions)
-      q = q.getAll(person_actions..., {index: "person_action"} )
-      .filter( (row) => row('created_at').le(@convert_date(options.current_datetime)))
-      .orderBy(r.desc('created_at'))
-    else
-      q = q.between([person,actions...,r.minval], [person, actions..., @convert_date(options.current_datetime)],
-        {index: 'person_action_created_at'}).orderBy({index:r.desc("person_action_created_at")})
-
+    person_actions = ({person:person, action:a} for a in actions)
+    q = r.expr(person_actions).concatMap((row) =>
+          r.table("#{namespace}_events").between([row('person'),row('action'), r.minval], [row('person'), row('action'), @convert_date(options.current_datetime)],
+            {index: 'person_action_created_at',leftBound:'open',rightBound: 'open'}).orderBy({index:r.desc("person_action_created_at")})
+    )
 
     q = q.limit(options.neighbourhood_search_size)
 
-    if actions.length > 1
-      q = q.concatMap((row) =>
+    q = q.concatMap((row) =>
+      r.expr(person_actions).concatMap((row1) =>
         r.table("#{namespace}_events")
-        .getAll(row("thing"),{index: "thing"})
-        .filter((row) -> r.expr(actions).contains(row('action')))
-        .filter((row) -> row("person").ne(person))
-        .filter( (row) => row('created_at').le(@convert_date(options.current_datetime)))
-      )
-    else
-      q = q.concatMap((row) =>
-        r.table("#{namespace}_events")
-        .between([row("thing"),row('action'),r.minval,r.minval],
-          [row("thing"), row('action'),r.maxval, @convert_date(options.current_datetime)],
-        {index: 'thing_action_person_created_at'}).filter((row) -> row("person").ne(person))
-      )
-
+          .between([row("thing"),row1("action"),r.minval,r.minval],
+          [row("thing"), row1("action"),r.maxval, @convert_date(options.current_datetime)],
+          {index: 'thing_action_person_created_at'})
+          .filter((row) -> row("person").ne(person))
+        )
+    )
 
     q = q.group("person")
     .ungroup()
@@ -518,24 +527,14 @@ class RethinkDBESM
       }
     )
 
-    if actions.length > 1
-      q = q.filter( (row) =>
+    q = q.filter( (row) =>
+      r.expr(person_actions).concatMap((row1) =>
         r.table("#{namespace}_events")
-          .getAll(row("person"),{index: "person"})
-          .filter((row) -> r.expr(actions).contains(row('action')))
-          .filter((row) => row('expires_at').ge(@convert_date(expires_after)))
-          .count()
-          .gt(0)
-        )
-    else
-      q = q.filter( (row) =>
-        r.table("#{namespace}_events")
-          .between([row("person"),actions...,@convert_date(expires_after)],
-          [row("person"), actions..., r.maxval],
+          .between([row("person"),row1("action"), @convert_date(expires_after)],
+          [row("person"), row1("action"), r.maxval],
           {index: 'person_action_expires_at'})
-        .count()
-        .gt(0)
-        )
+        ).group("person").ungroup().count().gt(0)
+      )
 
     q = q.orderBy(r.desc("count"))
     .limit(options.neighbourhood_size)("person")
@@ -569,9 +568,7 @@ class RethinkDBESM
       current_datetime: new Date()
     )
     expires_after = moment(options.current_datetime).add(options.time_until_expiry, 'seconds').format()
-#    dt = moment(options.current_datetime).add(-1, 'seconds').format()
 
-#    console.log("recent_recommendations_by_people, date -> ",expires_after,dt)
     r = @_r
     people_actions = []
     for p in people
@@ -629,12 +626,14 @@ class RethinkDBESM
 
   get_active_things: (namespace) ->
     #Select 10K events, count frequencies order them and return
-    q = @_r.table("#{namespace}_events", ).sample(10000)
+    q = @_r.table("#{namespace}_events", )
+    #.sample(10000)
     .group('thing')
     .count()
     .ungroup()
     .orderBy(@_r.desc('reduction'))
     .limit(100)('group')
+
     if (DEBUG)
       console.log("get_active_things query -> ",q)
 
@@ -642,12 +641,18 @@ class RethinkDBESM
 
   get_active_people: (namespace) ->
     #Select 10K events, count frequencies order them and return
-    @_r.table("#{namespace}_events", ).sample(10000)
+    q = @_r.table("#{namespace}_events", )
+    #.sample(10000)
     .group('person')
     .count()
     .ungroup()
     .orderBy(@_r.desc('reduction'))
-    .limit(100)('group').run()
+    .limit(100)('group')
+
+    if (DEBUG)
+      console.log("get_active_people query -> ",q)
+
+    q.run()
 
   compact_people : (namespace, compact_database_person_action_limit, actions) ->
     @get_active_people(namespace)
@@ -669,8 +674,8 @@ class RethinkDBESM
     promises = []
     for thing in things
       for action in actions
-        promises.push @_r.table("#{namespace}_events").getAll([thing, action], {index: "thing_action"}).orderBy(@_r.desc("created_at")).skip(trunc_size).delete().run({ durability: "soft"})
-
+        promises.push @_r.table("#{namespace}_events").between([thing, action,@_r.minval],[thing, action,@_r.maxval],{index: "thing_action_created_at"}).orderBy(@_r.desc("thing_action_created_at")).skip(trunc_size).delete().run({ durability: @_DURABILITY})
+    #cut each action down to size
     bb.all(promises)
 
 
@@ -680,7 +685,7 @@ class RethinkDBESM
     promises = []
     for person in people
       for action in actions
-        promises.push @_r.table("#{namespace}_events").getAll([person, action],{index: "person_action"}).orderBy(@_r.desc("created_at")).skip(trunc_size).delete().run({durability: "soft"})
+        promises.push @_r.table("#{namespace}_events").between([person, action,@_r.minval],[person, action,@_r.maxval],{index: "person_action_created_at"}).orderBy({index:@_r.desc("person_action_created_at")}).skip(trunc_size).delete().run({durability: @_DURABILITY})
     #cut each action down to size
     bb.all(promises)
 
@@ -688,7 +693,7 @@ class RethinkDBESM
     #TODO move too offset method
     #removes old events till there is only number_of_events left
     @_r.table("#{namespace}_events").orderBy({index: @_r.desc("created_at")})
-    .skip(number_of_events).delete().run({durability: "soft"})
+    .skip(number_of_events).delete().run({durability: @_DURABILITY})
 
   ###########################################
   ####     END Compact Function          ####
