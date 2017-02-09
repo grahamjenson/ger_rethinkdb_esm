@@ -24,6 +24,7 @@ class RethinkDBESM
     @_DURABILITY = orms.durability || "soft"
     @_CONFLICT = orms.conflict || "update"
     @_BATCH_SIZE = orms.batch_size || 500
+    @_READ_MODE = orms.read_mode || "outdated"
 
   try_create_db:(db) ->
     return @_r.dbCreate(db).run().then(-> true).catch(-> true)
@@ -85,35 +86,28 @@ class RethinkDBESM
         promises = promises.concat([
           @_r.table("#{namespace}_events").indexCreate("created_at").run(),
           @_r.table("#{namespace}_events").indexCreate("expires_at",@_r.row("expires_at").default(false)).run(),
+
           @_r.table("#{namespace}_events").indexCreate("person").run(),
           @_r.table("#{namespace}_events").indexCreate("person_thing",[@_r.row("person"),@_r.row("thing")]).run(),
-          @_r.table("#{namespace}_events").indexCreate("thing_action",[@_r.row("thing"),@_r.row("action")]).run(),
 
           @_r.table("#{namespace}_events").indexCreate("person_action",[@_r.row("person"),@_r.row("action")]).run(),
           @_r.table("#{namespace}_events").indexCreate("person_action_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("created_at")]).run(),
 
-          #new indexes for performance
-          @_r.table("#{namespace}_events").indexCreate("person_created_at_expires_at_action",[@_r.row("person"),@_r.row("created_at"),@_r.row("expires_at"),@_r.row("action")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("person_created_at",[@_r.row("person"),@_r.row("created_at")]).run(),
 
+          @_r.table("#{namespace}_events").indexCreate("person_action_expires_at",[@_r.row("person"),@_r.row("action"),@_r.row("expires_at").default(false)]).run(),
+          @_r.table("#{namespace}_events").indexCreate("person_thing_created_at",[@_r.row("person"),@_r.row("thing"),@_r.row("created_at")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("person_expires_at_created_at",[@_r.row("person"),@_r.row("expires_at").default(false),@_r.row("created_at")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("person_action_expires_at_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("expires_at").default(false),@_r.row("created_at")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("created_at_person_action_expires_at",[@_r.row("created_at"),@_r.row("person"),@_r.row("action"),@_r.row("expires_at").default(false)]).run(),
 
+          @_r.table("#{namespace}_events").indexCreate("thing_action",[@_r.row("thing"),@_r.row("action")]).run(),
           @_r.table("#{namespace}_events").indexCreate("thing_action_person_created_at",[@_r.row("thing"),@_r.row("action"),@_r.row("person"),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("thing_action_created_at",[@_r.row("thing"),@_r.row("action"),@_r.row("created_at")]).run(),
           @_r.table("#{namespace}_events").indexCreate("thing_action_created_at_expires_at",[@_r.row("thing"),@_r.row("action"),@_r.row("created_at"),@_r.row("expires_at").default(false)]).run(),
-
           @_r.table("#{namespace}_events").indexCreate("thing_created_at",[@_r.row("thing"),@_r.row("created_at")]).run(),
+
           @_r.table("#{namespace}_events").indexCreate("action_created_at",[@_r.row("action"),@_r.row("created_at")]).run(),
-
-
-          @_r.table("#{namespace}_events").indexCreate("person_action_expires_at",[@_r.row("person"),@_r.row("action"),@_r.row("expires_at").default(false)]).run(),
-          @_r.table("#{namespace}_events").indexCreate("last_actioned_at",@_r.row("last_actioned_at").default(false)).run(),
-
-          @_r.table("#{namespace}_events").indexCreate("person_action_thing_expires_at_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("thing"),@_r.row("expires_at").default(false),@_r.row("created_at")]).run(),
-          @_r.table("#{namespace}_events").indexCreate("person_thing_created_at",[@_r.row("person"),@_r.row("thing"),@_r.row("created_at")]).run(),
-
-          @_r.table("#{namespace}_events").indexCreate("person_expires_at_created_at",[@_r.row("person"),@_r.row("expires_at").default(false),@_r.row("created_at")]).run(),
-          @_r.table("#{namespace}_events").indexCreate("person_created_at",[@_r.row("person"),@_r.row("created_at")]).run(),
-
-          @_r.table("#{namespace}_events").indexCreate("thing").run(),
           @_r.table("#{namespace}_events").indexCreate("action").run()
 
         ])
@@ -225,12 +219,12 @@ class RethinkDBESM
       if (DEBUG)
         console.log("find_events query people -> ",q)
 
-      q.run()
+      q.run({readMode:@_READ_MODE})
 
     else if person and action and thing
       #Fast single look up
       @_event_selection(namespace, person, action, thing)
-      .run()
+      .run({readMode:@_READ_MODE})
       .then( (e) ->
         return [] if !e
         [e] # have to put it into a list
@@ -276,7 +270,7 @@ class RethinkDBESM
       if (DEBUG)
         console.log("find_events query -> ",q)
 
-      q.run()
+      q.run({readMode:@_READ_MODE})
 
   delete_events: (namespace, options= {}) ->
     person = options.person
@@ -287,10 +281,10 @@ class RethinkDBESM
     .run({durability: @_DURABILITY})
 
   count_events: (namespace) ->
-    @_r.table("#{namespace}_events").count().run()
+    @_r.table("#{namespace}_events").count().run({readMode:@_READ_MODE})
 
   estimate_event_count: (namespace) ->
-    @_r.table("#{namespace}_events").count().run()
+    @_r.table("#{namespace}_events").count().run({readMode:@_READ_MODE})
 
   _event_selection: (namespace, person, action, thing) ->
     single_selection = false
@@ -383,7 +377,7 @@ class RethinkDBESM
     if (DEBUG)
       console.log("thing_neighbourhood query -> ",q)
 
-    q.run()
+    q.run({readMode:@_READ_MODE})
     # .then( (ret) ->
     #   console.log JSON.stringify(ret,null,2)
     #   ret
@@ -447,7 +441,7 @@ class RethinkDBESM
     if (DEBUG)
       console.log("get_cosine_distances query -> ",q)
 
-    q.run()
+    q.run({readMode:@_READ_MODE})
     .then( (ret) =>
       value_actions = {}
       for g in ret
@@ -542,7 +536,7 @@ class RethinkDBESM
     if (DEBUG)
       console.log("person_neighbourhood query -> ",q)
 
-    q.run()
+    q.run({readMode:@_READ_MODE})
 
   calculate_similarities_from_person: (namespace, person, people, actions, options={}) ->
     @_similarities(namespace, 'person', 'thing', person, people, actions, options)
@@ -557,7 +551,7 @@ class RethinkDBESM
     .coerceTo("ARRAY")("thing"))
     if (DEBUG)
       console.log("filter_things_by_previous_actions query -> ",q)
-    q.run()
+    q.run({readMode:@_READ_MODE})
 
   recent_recommendations_by_people: (namespace, actions, people, options = {}) ->
     return bb.try(->[]) if people.length == 0 || actions.length == 0
@@ -572,14 +566,14 @@ class RethinkDBESM
     r = @_r
     people_actions = []
     for p in people
-      people_actions.push {person: p}
+        for a in actions
+          people_actions.push {person: p, action: a}
 
     q = r.expr(people_actions)
       .concatMap((row) =>
         r.table("#{namespace}_events")
-        .between([row('person'), @convert_date(expires_after), r.minval], [row('person'), r.maxval, @convert_date(options.current_datetime)],
-        {index: 'person_expires_at_created_at',leftBound:'open',rightBound: 'closed'})
-        .filter((row) -> r.expr(actions).contains(row('action')))
+        .between([row('person'), row('action'), @convert_date(expires_after), r.minval], [row('person'), row('action'), r.maxval, @convert_date(options.current_datetime)],
+        {index: 'person_action_expires_at_created_at',leftBound:'closed',rightBound: 'closed'})
         #TODO: remove this filter finding why between for current_datetime fails
         .filter( (row) => row('created_at').le(@convert_date(options.current_datetime)))
         .orderBy(r.desc("created_at"))
@@ -600,11 +594,11 @@ class RethinkDBESM
     if (DEBUG)
       console.log("recent_recommendations_by_people query -> ",q)
 
-    q.run()
+    q.run({readMode:@_READ_MODE})
 
-  ###########################################
-  #### END Person Recommendation Function####
-  ###########################################
+  ############################################
+  #### END Person Recommendation Function ####
+  ############################################
 
 
 
@@ -637,7 +631,7 @@ class RethinkDBESM
     if (DEBUG)
       console.log("get_active_things query -> ",q)
 
-    q.run()
+    q.run({readMode:@_READ_MODE})
 
   get_active_people: (namespace) ->
     #Select 10K events, count frequencies order them and return
@@ -652,7 +646,7 @@ class RethinkDBESM
     if (DEBUG)
       console.log("get_active_people query -> ",q)
 
-    q.run()
+    q.run({readMode:@_READ_MODE})
 
   compact_people : (namespace, compact_database_person_action_limit, actions) ->
     @get_active_people(namespace)
