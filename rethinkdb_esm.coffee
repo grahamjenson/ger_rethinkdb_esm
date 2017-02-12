@@ -91,6 +91,7 @@ class RethinkDBESM
           @_r.table("#{namespace}_events").indexCreate("person_thing",[@_r.row("person"),@_r.row("thing")]).run(),
 
           @_r.table("#{namespace}_events").indexCreate("person_action",[@_r.row("person"),@_r.row("action")]).run(),
+          @_r.table("#{namespace}_events").indexCreate("person_action_thing",[@_r.row("person"),@_r.row("action"),@_r.row("thing")]).run(),
           @_r.table("#{namespace}_events").indexCreate("person_action_created_at",[@_r.row("person"),@_r.row("action"),@_r.row("created_at")]).run(),
 
           @_r.table("#{namespace}_events").indexCreate("person_created_at",[@_r.row("person"),@_r.row("created_at")]).run(),
@@ -345,18 +346,22 @@ class RethinkDBESM
 
     thing_actions = ({thing:thing, action:a} for a in actions)
 
+    #get all the people actions related to this thing
     q = r.expr(thing_actions).concatMap((row) =>
           r.table("#{namespace}_events").between([row("thing"),row("action"),r.minval, @convert_date(options.expires_after)], [row("thing"),row("action"), @convert_date(options.current_datetime),r.maxval],
           {index: 'thing_action_created_at_expires_at'})
           .orderBy({index:r.desc("thing_action_created_at_expires_at")})
         )
     q = q.limit(options.neighbourhood_search_size)
+    #now get all actions for this people but that are not for the same thing
     .concatMap((row) =>
       r.expr(thing_actions).concatMap((row1) =>
-        r.table("#{namespace}_events").getAll([row("person"), row1('action')],{index: "person_action"})
-          .filter((row) -> row("thing").ne(thing))
+        r.table("#{namespace}_events").between([row("person"), row1('action'), r.minval], [row("person"), row1('action'), thing],
+          {index: "person_action_thing",rightBound:'open'}).union(r.table("#{namespace}_events")
+          .between([row("person"), row1('action'), thing], [row("person"), row1('action'), r.maxval],{index: "person_action_thing",leftBound:'open'}))
       )
     )
+    #find group the things and find out all people involved
     .group("thing")
     .ungroup()
     .map((row) =>
@@ -497,7 +502,7 @@ class RethinkDBESM
     person_actions = ({person:person, action:a} for a in actions)
     q = r.expr(person_actions).concatMap((row) =>
           r.table("#{namespace}_events").between([row('person'),row('action'), r.minval], [row('person'), row('action'), @convert_date(options.current_datetime)],
-            {index: 'person_action_created_at',leftBound:'open',rightBound: 'open'}).orderBy({index:r.desc("person_action_created_at")})
+            {index: 'person_action_created_at'}).orderBy({index:r.desc("person_action_created_at")})
     )
 
     q = q.limit(options.neighbourhood_search_size)
