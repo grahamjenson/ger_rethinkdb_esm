@@ -29,7 +29,7 @@
         "test": "mocha"
     },
     "main": "rethinkdb_esm.js",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "license": "MIT",
     "repository": {
         "type": "git",

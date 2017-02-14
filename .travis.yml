@@ -1,0 +1,7 @@
+dist: trusty
+sudo: false
+addons:
+  rethinkdb: "2.3"
+language: node_js
+node_js:
+  - "7"
